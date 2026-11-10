@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BOM Tag viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #11151f;
+               font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  canvas { display: block; }
+
+  /* Tooltip */
+  #tip { position: fixed; pointer-events: none; display: none; padding: 8px 12px;
+         background: #fff; border-radius: 8px; font-size: 14px; color: #111;
+         box-shadow: 0 6px 20px rgba(0,0,0,.35); white-space: nowrap; }
+  #tip b { display: inline-block; min-width: 22px; height: 22px; line-height: 22px;
+           border-radius: 11px; background: #006bff; color: #fff; text-align: center; margin-right: 6px; }
+  #tip span { color: #667; }
+
+  /* Loader */
+  #loader { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+            justify-content: center; gap: 18px; background: #11151f; color: #dfe5f2;
+            transition: opacity .5s ease; z-index: 10; }
+  #loader.hidden { opacity: 0; pointer-events: none; }
+  .spinner { width: 46px; height: 46px; border-radius: 50%;
+             border: 4px solid rgba(255,255,255,.12); border-top-color: #1f6fff;
+             animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .bar { width: 240px; height: 6px; border-radius: 3px; background: rgba(255,255,255,.12); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: #1f6fff; border-radius: 3px; transition: width .2s ease; }
+  .bar.indeterminate i { width: 35%; animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(290%); } }
+  #status { font-size: 14px; color: #9aa6c0; }
+  #loader.error .spinner { display: none; }
+  #loader.error #status { color: #ff8a8a; max-width: 360px; text-align: center; line-height: 1.5; }
+
+  /* Hint */
+  #hint { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+          color: #8a94ab; font-size: 13px; pointer-events: none; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="loader">
+  <div class="spinner"></div>
+  <div class="bar indeterminate" id="bar"><i></i></div>
+  <div id="status">Loading model…</div>
+</div>
+<div id="tip"></div>
+<div id="hint">Hover a part to see its BOM data · drag to orbit · scroll to zoom</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const MODEL_URL = 'model.glb';
+
+// --- Loader UI ------------------------------------------------------------
+const loaderEl = document.getElementById('loader');
+const barEl = document.getElementById('bar');
+const fillEl = barEl.querySelector('i');
+const statusEl = document.getElementById('status');
+
+function setProgress(loaded, total) {
+  if (total > 0) {
+    const pct = Math.min(100, Math.round((loaded / total) * 100));
+    barEl.classList.remove('indeterminate');
+    fillEl.style.width = pct + '%';
+    statusEl.textContent = `Loading model… ${pct}%`;
+  } else {
+    // Server did not send the file size: show an animated bar and the MB loaded
+    barEl.classList.add('indeterminate');
+    statusEl.textContent = `Loading model… ${(loaded / 1048576).toFixed(1)} MB`;
+  }
+}
+function hideLoader() { loaderEl.classList.add('hidden'); }
+function showError(msg) {
+  loaderEl.classList.add('error');
+  barEl.style.display = 'none';
+  statusEl.innerHTML = msg;
+}
+
+// --- Scene ----------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x11151f);
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment()).texture;
+
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.01, 1000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const tip = document.getElementById('tip');
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+let model = null, hovered = null;
+
+// --- Load -----------------------------------------------------------------
+new GLTFLoader().load(
+  MODEL_URL,
+  (gltf) => {
+    model = gltf.scene;
+    scene.add(model);
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3()).length();
+    const center = box.getCenter(new THREE.Vector3());
+    camera.near = size / 1000; camera.far = size * 100; camera.updateProjectionMatrix();
+    camera.position.copy(center).add(new THREE.Vector3(0.6, 0.45, 0.8).multiplyScalar(size));
+    controls.target.copy(center);
+    controls.update();
+    fillEl.style.width = '100%';
+    statusEl.textContent = 'Ready';
+    // let the first frame render before fading out
+    requestAnimationFrame(() => requestAnimationFrame(hideLoader));
+  },
+  (e) => setProgress(e.loaded, e.total),
+  (err) => {
+    console.error(err);
+    const local = location.protocol === 'file:';
+    showError(local
+      ? 'Could not load <b>model.glb</b>.<br>Browsers block files opened with file://. Serve this folder with a local server, e.g. <code>npx serve</code> or <code>python3 -m http.server</code>.'
+      : 'Could not load <b>model.glb</b>.<br>Check that the file is next to this page and is a valid GLB.');
+  }
+);
+
+// --- Hover ----------------------------------------------------------------
+const bomNode = (o) => { while (o && !o.userData.bom_item) o = o.parent; return o; };
+
+function highlight(node, on) {
+  node?.traverse((m) => {
+    if (!m.isMesh) return;
+    if (on) {
+      m.userData._mat = m.material;
+      m.material = m.material.clone();
+      m.material.emissive = new THREE.Color(0x1f6fff);
+      m.material.emissiveIntensity = 0.6;
+    } else if (m.userData._mat) {
+      m.material.dispose();
+      m.material = m.userData._mat;
+      delete m.userData._mat;
+    }
+  });
+}
+
+addEventListener('pointermove', (e) => {
+  if (!model) return;
+  mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObject(model, true)[0];
+  const node = hit ? bomNode(hit.object) : null;
+  if (node !== hovered) { highlight(hovered, false); highlight(node, true); hovered = node; }
+  if (node) {
+    const d = node.userData;
+    tip.innerHTML = `<b>${d.bom_item}</b>${d.bom_name ?? ''} <span>×${d.bom_qty ?? 1}</span>`;
+    tip.style.left = e.clientX + 14 + 'px';
+    tip.style.top = e.clientY + 14 + 'px';
+    tip.style.display = 'block';
+    renderer.domElement.style.cursor = 'pointer';
+  } else {
+    tip.style.display = 'none';
+    renderer.domElement.style.cursor = '';
+  }
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+</script>
+</body>
+</html>
